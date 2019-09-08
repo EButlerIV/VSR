@@ -5,6 +5,10 @@ import Control.Distributed.Viewstamped.Replica
 import Data.Maybe
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as M
+import Control.Concurrent
+import Control.Monad.State
+import Control.Monad.Trans
+import Control.Concurrent.STM
 
 data Status = Normal | ViewChange | Recovering deriving (Show, Eq)
 type OpNumber = Integer
@@ -581,7 +585,125 @@ mostRecent rep cId = case latest of
     where latest = M.lookup cId (clientTable rep)
           getReq = (\(ClientRequest _ _ r) -> r) 
 
-newtype Stepper m = Stepper { runStepper :: (Replica -> Event -> m ([Event], Replica)) }
+
+
+-- ALTERNATE ATTEMPT: 
+-- Write a "runner" for the machine in IO that repeatedly attempts to read from/write to
+-- input and output queues. Write separate sources/consumers that do similarly, kick off or process events
+
+run :: Replica -> IO ()
+run r = do
+    i <- newTChanIO
+    o <- newTChanIO
+    cTP <- connectCommitTimeoutProducer i o
+    runReplica r i o
+
+runReplica :: Replica -> TChan Event -> TChan Event -> IO ()
+runReplica r i o = do
+    ev <- atomically $ readTChan i
+    (res, newRep) <- pure $ step r ev
+    mapM (\e -> atomically $ writeTChan o e) res
+    runReplica newRep i o
+
+-- Figure out some way to keep track of producers, consumers. Clear them when necessary
+data Producer = CommitTimeoutProducer ThreadId deriving (Show, Eq)
+connectCommitTimeoutProducer :: TChan Event -> TChan Event -> IO (Producer)
+connectCommitTimeoutProducer _i _o = do
+        i <- atomically $ cloneTChan _i
+        tId <- forkIO $ atomically $ writeTChan _o SendCommitTimeoutReached
+        go i _o tId
+    where go i o tid = do
+            evt <- atomically $ readTChan i
+            case evt of
+                (ReceivedMessage _ (Commit _ _)) -> do
+                    killThread tid
+                    tId <- forkIO $ atomically $ writeTChan o SendCommitTimeoutReached
+                    go i o tId
+                _ -> go i o tid
+
+
+-- data ReplicaState = ReplicaState { replica :: Replica, input :: TQueue Event, output :: TQueue Event }
+-- data ReplicaRunner m a = StateT (m ReplicaState)
+
+-- newReplicaRunner :: Replica -> IO (ReplicaRunner m a)
+-- newReplicaRunner r = do
+--     i <- newTQueueIO
+--     o <- newTQueueIO
+--     s <- pure $ ReplicaState r i o
+--     return $ return s
+
+
+-- I need to
+-- Fire timeouts when appropriate (and reset after certain messages)
+-- "Read" messages from the network or some surrounding thing
+-- "Send" subset of messages to the network or some surrounding thing
+
+-- Does it make sense to define a single monad that implements all of the functionality?
+-- How do I implement that functionality in a nearly-pure way? (Esp. timeouts?)
+
+-- machine: ReplicaState -> Event -> ([Event], ReplicaState)
+-- timeoutWrapper: Event -> IO (ReplicaState -> Event -> ([Event], Replica))
+-- { timerId ThreadId, }
+
+{-
+
+
+ st -> ExernalMsg -> ([Response], st)
+
+ ==>>
+
+ (st , timerst ) -> (ExternalMsg `Either` TimerMsg) -> ([Response], st , timerst )
+
+-}
+
+-- data Time 
+-- data TimeReg
+-- data  StepperT m a where 
+ 
+
+-- data TimeoutState m = TimeoutState { stepper :: Stepper m, thread :: ThreadId }
+
+-- data TimeoutStepper m = StateT (TimeoutState m) (Stepper m)
+
+-- listenForTimeout :: (MonadIO m) => Stepper m -> Int -> Event -> TimeoutStepper m
+-- listenForTimeout s t e = do
+--     tId <- forkIO undefined
+--     -- TODO: important timeout business
+--     return $ TimeoutState s tId
+    
+
+
+
+-- -- type MTimeout = StateT
+
+-- class (Monad m) => MonadTimeout m where
+--     registerTimeout :: Int -> (TimerId -> m ()) -> m (TimerId)
+--     resetTimeout :: TimerId -> m Bool 
+
+
+
+-- -- instance MonadTimeout IO where
+-- --     setTimeout time s = do
+-- --         tId <- forkIO $ threadDelay time >> return () -- TODO
+-- --         return s
+-- --     resetTimeout = undefined
+
+
+-- -- newtype Stepper m = Stepper { runStepper :: (Replica -> Event -> m ([Event], Replica)) }
+
+-- -- listenForCommitTimeouts :: (MonadTimeout m) => Stepper m -> Stepper m
+-- -- listenForCommitTimeouts s = do
+-- --     tId <- setTimeout 100 SendCommitTimeoutReached
+-- --     tOut <- undefined
+-- --     -- TODO: Pretend right code exists here
+-- --     return $ \r e -> do
+        
+-- --         runStepper s >>= ()
+-- --     where \r e -> step 
+
+
+
+
 
 
 
